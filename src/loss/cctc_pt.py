@@ -8,13 +8,13 @@ import numpy as np
 
 class CCTCLoss():
     def __init__(self, blank_index=0,
-                ct_loss_left_weight=0,
-                ct_loss_right_weight=0,
+                ct_loss_left_weight=np.array([1]),
+                ct_loss_right_weight=np.array([1]),
                 ctc_loss_weight=1, 
                 version='numpy', reduction='mean', zero_infinity=True):
         self.blank_index = blank_index
-        self.ct_loss_left_weight = ct_loss_left_weight
-        self.ct_loss_right_weight = ct_loss_right_weight
+        self.ct_loss_left_weight = torch.tensor(ct_loss_left_weight)
+        self.ct_loss_right_weight = torch.tensor(ct_loss_right_weight)
         self.ctc_loss_weight = ctc_loss_weight
 
         self.ct_criterion = CTLoss(blank_index, version)
@@ -38,22 +38,6 @@ class CCTCLoss():
         cctc_loss = (self.ctc_loss_weight * ctc_loss) + (self.ct_loss_left_weight * ct_loss_left).sum() \
                 + (self.ct_loss_right_weight * ct_loss_right).sum()
         return cctc_loss
-
-    
-    def CCTC_loss(log_prob_mid,
-                            log_probs_left,
-                            log_probs_right,
-                            input_lengths,
-                            blank_index=0, 
-                            version='numpy'):
-    # log_prob_mid (time_step, batch, num_classes)
-    # log_probs_left [(time_step, batch, num_classes)] list of left order
-    # log_probs_right [(time_step, batch, num_classes)] list of right order
-    # input_lengths (batch)
-    left_labs, right_labs = get_cctc_label(log_prob_mid, input_lengths, blank_index=0,\
-        lhead=len(log_probs_left), rhead=len(log_probs_right), version=version)
-    return compute_cctc_loss(log_probs_left, log_probs_right, left_labs, right_labs, input_lengths)
-
 
 
 class CTLoss():
@@ -212,29 +196,42 @@ if __name__ == '__main__':
 
     print('generating data...')
     # pre-random
-    W = [torch.randn(2000, 64, 94, requires_grad=True) for i in range(n)]
-    X = [torch.randn(2000, 64, 94, requires_grad=True) for i in range(n)]
-    Y = [torch.randn(2000, 64, 94, requires_grad=True) for i in range(n)]
-    Z = [torch.full((64, ), 2000, dtype=torch.int) for i in range(n)]
+    n_class=94
+    batch_size=64
+    time_size=2000
+    lab_len=100
+
+    W = [torch.randn(time_size, batch_size, n_class, requires_grad=True) for i in range(n)]
+    X = [torch.randn(time_size, batch_size, n_class, requires_grad=True) for i in range(n)]
+    Y = [torch.randn(time_size, batch_size, n_class, requires_grad=True) for i in range(n)]
+    Z = [torch.full((batch_size, ), time_size, dtype=torch.int) for i in range(n)]
+    labels = torch.randint(low=1, high=n_class, size=(batch_size, lab_len), dtype=torch.int32)
+    labels_length = torch.ones(batch_size, dtype=torch.int32)*lab_len
     blank_index = 0
 
-    print('start!')
-    start = time.time()
-    A = []
-    ct_criterion = CTLoss(blank_index, 'tensor')
-    for w, x, y, z in tqdm(zip(W, X, Y, Z)):
-        A.append( ct_criterion(w, [x,x], [y,y], z) )
-    print('tensor version:', round((time.time() - start) / n, 5))
+    # print('start!')
+    # start = time.time()
+    # A = []
+    # ct_criterion = CTLoss(blank_index, 'tensor')
+    # for w, x, y, z in tqdm(zip(W, X, Y, Z)):
+    #     A.append( ct_criterion(w, [x,x], [y,y], z) )
+    # print('tensor version:', round((time.time() - start) / n, 5))
 
     start = time.time()
     B = []
     ct_criterion = CTLoss(blank_index, 'numpy')
     for w, x, y, z in tqdm(zip(W, X, Y, Z)):
         B.append( ct_criterion(w, [x,x], [y,y], z) )
-    print('numpy version:', round((time.time() - start) / n, 5))
+    print('\nnumpy version:', round((time.time() - start) / n, 5))
     
-    print('are they the same?')
-    for a, b in zip(A,B):
-        #print( (a-b < 1e-7).all() )
-        for a_v, b_v in zip(a,b):
-            print(a_v - b_v < 1e-7) 
+    # print('are they the same?')
+    # for a, b in zip(A,B):
+    #     #print( (a-b < 1e-7).all() )
+    #     for a_v, b_v in zip(a,b):
+    #         print(a_v - b_v < 1e-7) 
+
+    cctc_criterion = CCTCLoss(blank_index)
+    for w, x, y, z in tqdm(zip(W, X, Y, Z)):
+        cctc_criterion(w, [x,x], [y,y], z, labels, labels_length)
+
+    print('\nnumpy version:', round((time.time() - start) / n, 5))
