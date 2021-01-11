@@ -152,8 +152,8 @@ class CTLoss():
         left_loss = [tf.reduce_sum(select * left_loss[i],axis=1) / tf.cast(input_lengths, tf.dtypes.float32) for i in range(len(left_loss))]
         right_loss = [tf.reduce_sum(select * right_loss[i],axis=1) / tf.cast(input_lengths, tf.dtypes.float32) for i in range(len(right_loss))]
         
-        left_loss = [tf.reduce_mean(left_loss[i]) for i in range(len(left_loss))]
-        right_loss = [tf.reduce_mean(right_loss[i]) for i in range(len(right_loss))]
+        # left_loss = [tf.reduce_mean(left_loss[i]) for i in range(len(left_loss))]
+        # right_loss = [tf.reduce_mean(right_loss[i]) for i in range(len(right_loss))]
 
         return tf.stack(left_loss), tf.stack(right_loss)
 

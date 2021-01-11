@@ -89,8 +89,8 @@ class CTLoss():
         left_loss = [(select * left_loss[i]).sum(dim=1) / input_lengths.float() for i in range(len(left_loss))]
         right_loss = [(select * right_loss[i]).sum(dim=1) / input_lengths.float() for i in range(len(right_loss))]
         
-        left_loss = [left_loss[i].mean() for i in range(len(left_loss))]
-        right_loss = [right_loss[i].mean() for i in range(len(right_loss))]
+        # left_loss = [left_loss[i].mean() for i in range(len(left_loss))]
+        # right_loss = [right_loss[i].mean() for i in range(len(right_loss))]
 
         return torch.stack(left_loss), torch.stack(right_loss)
 
