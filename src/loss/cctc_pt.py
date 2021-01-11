@@ -1,6 +1,5 @@
 # Untested
 import torch
-import torch.multiprocessing as mp
 from itertools import repeat
 import time
 import numpy as np
@@ -209,13 +208,6 @@ if __name__ == '__main__':
     labels_length = torch.ones(batch_size, dtype=torch.int32)*lab_len
     blank_index = 0
 
-    # print('start!')
-    # start = time.time()
-    # A = []
-    # ct_criterion = CTLoss(blank_index, 'tensor')
-    # for w, x, y, z in tqdm(zip(W, X, Y, Z)):
-    #     A.append( ct_criterion(w, [x,x], [y,y], z) )
-    # print('tensor version:', round((time.time() - start) / n, 5))
 
     start = time.time()
     B = []
@@ -223,12 +215,7 @@ if __name__ == '__main__':
     for w, x, y, z in tqdm(zip(W, X, Y, Z)):
         B.append( ct_criterion(w, [x,x], [y,y], z) )
     print('\nnumpy version:', round((time.time() - start) / n, 5))
-    
-    # print('are they the same?')
-    # for a, b in zip(A,B):
-    #     #print( (a-b < 1e-7).all() )
-    #     for a_v, b_v in zip(a,b):
-    #         print(a_v - b_v < 1e-7) 
+
 
     cctc_criterion = CCTCLoss(blank_index)
     for w, x, y, z in tqdm(zip(W, X, Y, Z)):
