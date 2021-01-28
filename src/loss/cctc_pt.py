@@ -9,45 +9,95 @@ class CCTCLoss():
     def __init__(self, blank_index=0,
                 ct_loss_left_weight=np.array([1]),
                 ct_loss_right_weight=np.array([1]),
+                ct_loss_left_weight_ratio=None,
+                ct_loss_right_weight_ratio=None,
                 ctc_loss_weight=1, 
                 version='numpy', reduction='mean', zero_infinity=True):
         self.blank_index = blank_index
-        self.ct_loss_left_weight = torch.tensor(ct_loss_left_weight)
-        self.ct_loss_right_weight = torch.tensor(ct_loss_right_weight)
-        self.ctc_loss_weight = ctc_loss_weight
 
-        self.ct_criterion = CTLoss(blank_index, version)
+        if(ct_loss_left_weight != None and not torch.is_tensor(ct_loss_left_weight)):
+            self.ct_loss_left_weight = torch.tensor(ct_loss_left_weight, device='cuda')
+            self.ct_loss_right_weight = torch.tensor(ct_loss_right_weight, device='cuda')
+        else:
+            self.ct_loss_left_weight = ct_loss_left_weight
+            self.ct_loss_right_weight = ct_loss_right_weight
+        
+        self.ctc_loss_weight = ctc_loss_weight
+        self.ct_criterion = CTLoss(blank_index, version, reduction=reduction)
         self.ctc_criterion = torch.nn.CTCLoss(blank=blank_index, reduction=reduction, zero_infinity=zero_infinity)
         self.n_left_context_heads = len(ct_loss_left_weight)
         self.n_right_context_heads = len(ct_loss_right_weight)
+        self.ct_loss_left_weight_ratio = ct_loss_left_weight_ratio
+        self.ct_loss_right_weight_ratio = ct_loss_right_weight_ratio
 
-    def __call__(self, log_probs_mid, log_probs_left, log_probs_right, input_lengths, labels, label_lengths):
+    def __call__(self, log_probs_mid, log_probs_left, log_probs_right, input_lengths, labels, label_lengths, metrics=False):
+        if(not torch.is_tensor(input_lengths)):
+            input_lengths = torch.tensor(input_lengths, dtype=torch.int32, device=log_probs_mid.device)
+        if(not torch.is_tensor(label_lengths)):
+            label_lengths = torch.tensor(label_lengths, dtype=torch.int32, device=log_probs_mid.device)
+
         # CTC loss
         ctc_loss = self.ctc_criterion(log_probs_mid, labels, input_lengths, label_lengths)
 
         # CT loss
-        if( ((self.ct_loss_left_weight > 0) & (self.ct_loss_right_weight > 0)).any() ):
-            ct_loss_left, ct_loss_right = self.ct_criterion(log_probs_mid, \
-                log_probs_left, log_probs_right, input_lengths)
-        else:
-            ct_loss_left = torch.zeros(self.ct_loss_left_weight.size(), device=log_probs_mid.device)
-            ct_loss_right = torch.zeros(self.ct_loss_right_weight.size(), device=log_probs_mid.device)
+        ct_loss_left, ct_loss_right, _metrics = self.ct_criterion(log_probs_mid, \
+            log_probs_left, log_probs_right, input_lengths, metrics=metrics)
 
-        # CCTC loss
-        cctc_loss = (self.ctc_loss_weight * ctc_loss) + (self.ct_loss_left_weight * ct_loss_left).sum() \
-                + (self.ct_loss_right_weight * ct_loss_right).sum()
-        return cctc_loss
+        if(self.ct_loss_right_weight_ratio != None):
+            # CCTC loss
+            # Mean over batch, sum over CT order
+            with torch.no_grad():
+                ct_loss_left_weight = self.ctc_loss_weight * ctc_loss / (ct_loss_left.mean(dim=-1)).sum() * self.ct_loss_left_weight_ratio 
+                ct_loss_right_weight = self.ctc_loss_weight * ctc_loss / (ct_loss_right.mean(dim=-1)).sum() * self.ct_loss_right_weight_ratio 
+        else:
+            ct_loss_left_weight = self.ct_loss_left_weight
+            ct_loss_right_weight = self.ct_loss_right_weight
+
+        ct_loss_left_weighted = (ct_loss_left_weight * ct_loss_left).mean(dim=-1).sum()
+        ct_loss_right_weighted = (ct_loss_right_weight * ct_loss_right).mean(dim=-1).sum()
+        cctc_loss = (self.ctc_loss_weight * ctc_loss) + ct_loss_left_weighted + ct_loss_right_weighted
+
+        sub_losses = {
+            "loss_ctc"  : ctc_loss.item(),
+            "loss_ct_left"  : ct_loss_left.mean(dim=-1).sum().item(),
+            "loss_ct_right"  : ct_loss_right.mean(dim=-1).sum().item(),
+        }
+        if(metrics):
+            return cctc_loss, sub_losses, _metrics
+        else:
+            return cctc_loss, sub_losses
 
 
 class CTLoss():
-    def __init__(self, blank_index, version='numpy'):
+    def __init__(self, blank_index, version='numpy', reduction='mean'):
         self.blank_index = blank_index
         self.version = version
+        self.reduction = reduction
 
-    def __call__(self, log_prob_mid, log_probs_left, log_probs_right, input_lengths):
+    def __call__(self, log_prob_mid, log_probs_left, log_probs_right, input_lengths, metrics=False):
         left_labs, right_labs = self.get_ct_label(log_prob_mid, input_lengths, blank_index=self.blank_index,\
             lhead=len(log_probs_left), rhead=len(log_probs_right), version=self.version)
-        return self.compute_ct_loss(log_probs_left, log_probs_right, left_labs, right_labs, input_lengths) 
+        ct_loss = self.compute_ct_loss(log_probs_left, log_probs_right, left_labs, right_labs, input_lengths)
+        if(metrics):
+            _metrics = {
+                'left_ct_acc' : self.get_ct_metrics(log_probs_left, left_labs),
+                'right_ct_acc' : self.get_ct_metrics(log_probs_right, right_labs),
+                'acc_divider' : sum([lab.shape[0]*lab.shape[1] for lab in left_labs])
+            }
+            return (*ct_loss, _metrics)
+        else:
+            return (*ct_loss, None)
+
+
+    def get_ct_metrics(self, log_probs_list, labels_list):
+        # list for each ct order
+        acc = []
+        for i, log_prob in enumerate(log_probs_list):
+            # acc.append( (log_prob.argmax(dim=2).permute(1,0) == labels_list[i]).sum().item() / float(log_prob.size(0)) / log_prob.size(1) )
+            acc.append( (log_prob.argmax(dim=2).permute(1,0) == labels_list[i]).sum().item() )
+        # support 1st order only
+        return acc[0]
+            
 
     def get_ct_label(self, log_prob_mid, input_lengths, blank_index=0, lhead=1, rhead=1, version='numpy'):
         device=log_prob_mid.device
@@ -82,13 +132,17 @@ class CTLoss():
         # NLLLoss take argument in shape (batch, class, time_step)
         criterion = torch.nn.NLLLoss(reduction='none')
         select = torch.full(log_probs_left[0].size()[:-1], 1., device=log_probs_left[0].device).transpose(1,0)
-        for b in range(input_lengths.size(0)):
+        for b in range(input_lengths.shape[0]):
             select[b, input_lengths[b]:] = 0.
+
+        if(not torch.is_tensor(input_lengths)):
+            input_lengths = torch.tensor(input_lengths, dtype=torch.int32, device=log_probs_left[0].device)
+
         left_loss = [criterion(log_probs_left[i].permute(1,2,0), left_labs[i]) for i in range(len(left_labs))]
         right_loss = [criterion(log_probs_right[i].permute(1,2,0), right_labs[i]) for i in range(len(right_labs))]
         left_loss = [(select * left_loss[i]).sum(dim=1) / input_lengths.float() for i in range(len(left_loss))]
         right_loss = [(select * right_loss[i]).sum(dim=1) / input_lengths.float() for i in range(len(right_loss))]
-        
+
         # left_loss = [left_loss[i].mean() for i in range(len(left_loss))]
         # right_loss = [right_loss[i].mean() for i in range(len(right_loss))]
 
@@ -203,9 +257,12 @@ if __name__ == '__main__':
     W = [torch.randn(time_size, batch_size, n_class, requires_grad=True) for i in range(n)]
     X = [torch.randn(time_size, batch_size, n_class, requires_grad=True) for i in range(n)]
     Y = [torch.randn(time_size, batch_size, n_class, requires_grad=True) for i in range(n)]
-    Z = [torch.full((batch_size, ), time_size, dtype=torch.int) for i in range(n)]
+    # Z = [torch.full((batch_size, ), time_size, dtype=torch.int) for i in range(n)]
+    Z = [np.full((batch_size, ), time_size) for i in range(n)]
     labels = torch.randint(low=1, high=n_class, size=(batch_size, lab_len), dtype=torch.int32)
-    labels_length = torch.ones(batch_size, dtype=torch.int32)*lab_len
+    # labels_length = torch.ones(batch_size, dtype=torch.int32)*lab_len
+    # labels = np.random.randint(low=1, high=n_class, size=(batch_size, lab_len))
+    labels_length = np.ones(batch_size)*lab_len
     blank_index = 0
 
 
@@ -214,11 +271,11 @@ if __name__ == '__main__':
     ct_criterion = CTLoss(blank_index, 'numpy')
     for w, x, y, z in tqdm(zip(W, X, Y, Z)):
         B.append( ct_criterion(w, [x,x], [y,y], z) )
-    print('\nnumpy version:', round((time.time() - start) / n, 5))
+    print('\nct loss numpy version:', round((time.time() - start) / n, 5))
 
 
     cctc_criterion = CCTCLoss(blank_index)
     for w, x, y, z in tqdm(zip(W, X, Y, Z)):
         cctc_criterion(w, [x,x], [y,y], z, labels, labels_length)
 
-    print('\nnumpy version:', round((time.time() - start) / n, 5))
+    print('\ncctc loss numpy version:', round((time.time() - start) / n, 5))
